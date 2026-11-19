@@ -1,0 +1,92 @@
+# Builds upstream Equicord with the StreamDraw plugin and publishes it as a release.
+# Installed clients update themselves from this repo's latest release.
+name: Build Equicord + StreamDraw
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild and re-release even if nothing changed
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "streamdraw/*.sh"
+      - "streamdraw/install.*"
+      - ".github/workflows/streamdraw.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: streamdraw
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check configuration
+        env:
+          PLUGIN_REPO: ${{ vars.STREAMDRAW_PLUGIN_REPO }}
+          HAS_KEY: ${{ secrets.STREAMDRAW_DEPLOY_KEY != '' }}
+        run: |
+          [ -n "$PLUGIN_REPO" ] || { echo "::error::Set the STREAMDRAW_PLUGIN_REPO repository variable (owner/repo)"; exit 1; }
+          [ "$HAS_KEY" = "true" ] || { echo "::error::Add the STREAMDRAW_DEPLOY_KEY repository secret"; exit 1; }
+
+      - name: Check out this repo
+        uses: actions/checkout@v4
+
+      - name: Check out upstream Equicord
+        uses: actions/checkout@v4
+        with:
+          repository: Equicord/Equicord
+          ref: main
+          path: equicord
+          persist-credentials: false
+
+      - name: Check out the StreamDraw plugin
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.STREAMDRAW_PLUGIN_REPO }}
+          ssh-key: ${{ secrets.STREAMDRAW_DEPLOY_KEY }}
+          path: plugin
+          persist-credentials: false
+
+      - name: Record versions
+        id: sync
+        run: bash streamdraw/sync.sh
+        env:
+          FORCE: ${{ inputs.force }}
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Set up Node
+        if: steps.sync.outputs.build == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Cache pnpm store
+        if: steps.sync.outputs.build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.pnpm-store
+          key: pnpm-${{ hashFiles('equicord/pnpm-lock.yaml') }}
+          restore-keys: pnpm-
+
+      - name: Build
+        if: steps.sync.outputs.build == 'true'
+        run: bash streamdraw/build.sh
+        env:
+          HEAD_SHA: ${{ steps.sync.outputs.head }}
+
+      - name: Release
+        if: steps.sync.outputs.build == 'true'
+        run: bash streamdraw/release.sh
+        env:
+          HEAD_SHA: ${{ steps.sync.outputs.head }}
+          GH_TOKEN: ${{ github.token }}
+          KEEP_RELEASES: ${{ vars.STREAMDRAW_KEEP_RELEASES || '5' }}
